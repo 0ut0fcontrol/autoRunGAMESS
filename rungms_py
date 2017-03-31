@@ -1,0 +1,550 @@
+#!/usr/bin/python
+import os,sys
+import inspect
+from time import time
+
+__ver__ = 1.2
+__doc__ = """\n    GAMESS parallel scripts for mpi. --Lifeng Zhao\n\n"""
+
+## Path of GAMESS:
+GMSPATH='/opt/gamess2013may'
+
+## GAMESS version:
+VERNO='00'
+TARGET='mpi'
+if not os.access('%s/gamess.%s.x' % (GMSPATH,VERNO), os.X_OK):
+	raise Exception, "gamess.%s.x not accessible" % VERNO
+
+def read_args():
+	from optparse import OptionParser
+	parser = OptionParser(usage="usage: %prog [options] filename"+__doc__,
+	                      version="%prog"+str(__ver__))
+	parser.add_option('-f', '--input',
+	                  action='store',
+	                  dest='inputname',
+	                  help='Gamess input file name.')
+	parser.add_option('-o', '--output',
+	                  action='store',
+	                  dest='outputname',default='',
+	                  help='Name of Gamess output file.')
+	parser.add_option('--nproc',
+	                  action='store',
+	                  dest='np',default=8,
+	                  help='Num. of cores to be used.')
+	parser.add_option('--hostfile',
+	                  action='store',
+	                  dest='host',default='',
+	                  help='Hostfile name')
+	parser.add_option('--extbas',
+	                  action='store',
+	                  dest='extbas',default='',
+	                  help='External basis set file name.')
+	(options, args) = parser.parse_args()
+	return (options, args)
+
+
+def run_bash(cmd):
+    temp = os.popen(cmd,'r')
+    tempname = temp.read()
+    temp.close()
+    tempname = tempname.strip()
+    return tempname
+
+
+def IsJobtype(inpname,jobtype):
+    inpfile = open(inpname,'r')
+    while 1:
+        line = inpfile.readline()
+        if line=='': break
+        ndx0 = line.upper().find(jobtype)
+        if ndx0>-1:
+            ndx1 = line.find('#')
+            if ndx1==-1 or ndx1>ndx0: return 1
+    return 0
+
+def clear_memory(cutoff_nthreads=100):
+	temp = os.popen('ipcs -s | grep '+os.environ['USER'], 'r')
+	lines = []
+	while 1:
+		line = temp.readline()
+		line = line.strip()
+		if line=='': break
+		line = line.split()
+		lines.append(line[1])
+	temp.close()
+	if len(lines)<cutoff_nthreads: return
+	for no in lines:
+		os.system('ipcrm -s '+no)
+	return
+
+## clean up memory:
+clear_memory()
+
+## Read input arguments:
+(options, args) = read_args()
+
+## JOB_NAME and output name/file:
+JOB = options.inputname
+OUTNAME = options.outputname
+temp = os.path.splitext(JOB)
+if temp[1]=='.inp':
+    INPNAME = JOB
+    JOB = temp[0]
+else:
+    INPNAME = JOB+'.inp'
+if OUTNAME=='': OUT = sys.stdout
+#    OUTNAME == JOB+'.log'
+else: OUT = open(OUTNAME,'w')
+
+## User Name:
+USER = os.environ['USER']
+
+## JOB ID:
+if 'JOB_ID' in os.environ.keys():
+    JOB_ID = os.environ['JOB_ID']
+else:
+    JOB_ID = ''
+
+## Local runnign or not:
+SCR=run_bash('pwd')
+
+## NCPUS
+NCPUS = int(options.np)
+CPU_LIST = []
+CPU_DICT = {}
+
+# For hostfile format (each line): hostname without '.hn.org'
+SGEFile = options.host
+if options.host!='':
+    NCPUS = 0
+    tempfile = open(SGEFile,'r')
+    while 1:
+        line = tempfile.readline()
+        line = line.strip()
+        if line == '': break
+        if line in CPU_LIST:
+            CPU_DICT[line] += 1
+        else:
+            CPU_LIST.append(line)
+            CPU_DICT[line]  = 1
+    tempfile.close()
+## For pe_hostfile format (each line): "nodexx.hn.org 4 share@nodexx.hn.org <NULL>"
+## NNODES is set according to "$PE_HOSTFILE":
+if 'PE_HOSTFILE' in os.environ.keys():
+    PEFile = os.environ['PE_HOSTFILE']
+    PEFile = PEFile.strip()
+    OUT.write('\n++\n'+run_bash('cat %s'%PEFile)+'\n++\n\n')
+    NCPUS = 0
+    CPU_LIST = []
+    CPU_DICT = {}
+    tempfile = open(PEFile,'r')
+    while 1:
+        line = tempfile.readline()
+        line = line.strip()
+        if line == '': break
+        line = line.split()
+        tempnode = line[0].split('.')
+        tempnode = tempnode[0]
+        CPU_LIST.append(tempnode)
+        CPU_DICT[tempnode] = int(line[1])
+    tempfile.close()
+
+NNODES = len(CPU_LIST)
+if NNODES==0: NNODES = 1
+
+## Hostname:
+master = run_bash('hostname')
+
+## UNIXname:
+uname = run_bash('uname')
+
+## Start Time:
+date = run_bash('date')
+
+## Disk space of current directory:
+df = run_bash('df -k .')
+
+
+OUT.write('----- GAMESS execution script  (zhao_lf@yeah.net) -----\n')
+OUT.write('This job is running on host %s\n' % master)
+OUT.write('	under operating system %s at %s\n' % (uname,date))
+#os.system('limit stacksize 10000000')
+if SCR!='.':
+    temp = os.popen('cp %s/%s.inp %s/%s.F05' % (SCR,JOB,SCR,JOB), 'r')
+    temp.read()
+    temp.close()
+    os.chdir(SCR)
+else:
+    temp = os.popen('cp %s.inp %s.F05' % (JOB,JOB),'r')
+    temp.read()
+    temp.close()
+if options.extbas!='':
+    EXTBAS = options.extbas
+else:
+    EXTBAS = '/dev/null'
+
+
+#set echo
+#                        ASCII input files (see explanation above)
+os.putenv('AUXDATA', '%s/auxdata'%GMSPATH)
+os.putenv('ERICFMT', '%s/auxdata/ericfmt.dat'%GMSPATH)
+os.putenv('MCPPATH', '%s/auxdata/MCP'%GMSPATH)
+os.putenv('QUANPOL', '%s/auxdata/QUANPOL'%GMSPATH)
+os.putenv('BASPATH', '%s/auxdata/BASES'%GMSPATH)
+os.putenv( 'EXTBAS', EXTBAS)
+os.putenv( 'NUCBAS', '/dev/null')
+os.putenv( 'POSBAS', '/dev/null')
+#
+os.putenv( 'MAKEFP', '%s/%s.efp' % (SCR,JOB))  
+os.putenv( 'GAMMA', '%s/%s.gamma' % (SCR,JOB))  
+os.putenv('TRAJECT', '%s/%s.trj' % (SCR,JOB))  
+os.putenv('RESTART', '%s/%s.rst' % (SCR,JOB))  
+os.putenv('IRCDATA', '%s/%s.irc' % (SCR,JOB))  
+os.putenv(  'INPUT', '%s/%s.F05' % (SCR,JOB))
+os.putenv(  'PUNCH', '%s/%s.dat' % (SCR,JOB))
+if os.path.isfile(JOB+'.dat'):
+	temp = os.popen('rm '+JOB+'.dat')
+	temp.read()
+	temp.close()
+os.putenv( 'AOINTS', '%s/%s.F08' % (SCR,JOB))
+os.putenv( 'MOINTS', '%s/%s.F09' % (SCR,JOB))
+os.putenv('DICTNRY', '%s/%s.F10' % (SCR,JOB))
+os.putenv('DRTFILE', '%s/%s.F11' % (SCR,JOB))
+os.putenv('CIVECTR', '%s/%s.F12' % (SCR,JOB))
+os.putenv('CASINTS', '%s/%s.F13' % (SCR,JOB))
+os.putenv( 'CIINTS', '%s/%s.F14' % (SCR,JOB))
+os.putenv( 'WORK15', '%s/%s.F15' % (SCR,JOB))
+os.putenv( 'WORK16', '%s/%s.F16' % (SCR,JOB))
+os.putenv('CSFSAVE', '%s/%s.F17' % (SCR,JOB))
+os.putenv('FOCKDER', '%s/%s.F18' % (SCR,JOB))
+os.putenv( 'WORK19', '%s/%s.F19' % (SCR,JOB))
+os.putenv( 'DASORT', '%s/%s.F20' % (SCR,JOB))
+os.putenv('DFTINTS', '%s/%s.F21' % (SCR,JOB))
+os.putenv('DFTGRID', '%s/%s.F22' % (SCR,JOB))
+os.putenv( 'JKFILE', '%s/%s.F23' % (SCR,JOB))
+os.putenv( 'ORDINT', '%s/%s.F24' % (SCR,JOB))
+os.putenv( 'EFPIND', '%s/%s.F25' % (SCR,JOB))
+os.putenv('PCMDATA', '%s/%s.F26' % (SCR,JOB))                                     
+os.putenv('PCMINTS', '%s/%s.F27' % (SCR,JOB))
+os.putenv('SVPWRK1', '%s/%s.F26' % (SCR,JOB))
+os.putenv('SVPWRK2', '%s/%s.F27' % (SCR,JOB))
+os.putenv( 'COSCAV', '%s/%s.F26' % (SCR,JOB))
+os.putenv('COSDATA', '%s/%s.cosmo' % (SCR,JOB))
+os.putenv('COSPOT',  '%s/%s.pot' % (SCR,JOB))
+os.putenv( 'MLTPL',  '%s/%s.F28' % (SCR,JOB))
+os.putenv( 'MLTPLT', '%s/%s.F29' % (SCR,JOB))
+os.putenv( 'DAFL30', '%s/%s.F30' % (SCR,JOB))
+os.putenv( 'SOINTX', '%s/%s.F31' % (SCR,JOB))
+os.putenv( 'SOINTY', '%s/%s.F32' % (SCR,JOB))
+os.putenv( 'SOINTZ', '%s/%s.F33' % (SCR,JOB))
+os.putenv( 'SORESC', '%s/%s.F34' % (SCR,JOB))
+os.putenv('GCILIST', '%s/%s.F37' % (SCR,JOB))
+os.putenv('HESSIAN', '%s/%s.F38' % (SCR,JOB))
+os.putenv('QMMMTEI', '%s/%s.F39' % (SCR,JOB))
+os.putenv('SOCCDAT', '%s/%s.F40' % (SCR,JOB))
+os.putenv( 'AABB41', '%s/%s.F41' % (SCR,JOB))
+os.putenv( 'BBAA42', '%s/%s.F42' % (SCR,JOB))
+os.putenv( 'BBBB43', '%s/%s.F43' % (SCR,JOB))
+os.putenv( 'MCQD50', '%s/%s.F50' % (SCR,JOB))
+os.putenv( 'MCQD51', '%s/%s.F51' % (SCR,JOB))
+os.putenv( 'MCQD52', '%s/%s.F52' % (SCR,JOB))
+os.putenv( 'MCQD53', '%s/%s.F53' % (SCR,JOB))
+os.putenv( 'MCQD54', '%s/%s.F54' % (SCR,JOB))
+os.putenv( 'MCQD55', '%s/%s.F55' % (SCR,JOB))
+os.putenv( 'MCQD56', '%s/%s.F56' % (SCR,JOB))
+os.putenv( 'MCQD57', '%s/%s.F57' % (SCR,JOB))
+os.putenv( 'MCQD58', '%s/%s.F58' % (SCR,JOB))
+os.putenv( 'MCQD59', '%s/%s.F59' % (SCR,JOB))
+os.putenv( 'MCQD60', '%s/%s.F60' % (SCR,JOB))
+os.putenv( 'MCQD61', '%s/%s.F61' % (SCR,JOB))
+os.putenv( 'MCQD62', '%s/%s.F62' % (SCR,JOB))
+os.putenv( 'MCQD63', '%s/%s.F63' % (SCR,JOB))
+os.putenv( 'MCQD64', '%s/%s.F64' % (SCR,JOB))
+os.putenv('NMRINT1', '%s/%s.F61' % (SCR,JOB))
+os.putenv('NMRINT2', '%s/%s.F62' % (SCR,JOB))
+os.putenv('NMRINT3', '%s/%s.F63' % (SCR,JOB))
+os.putenv('NMRINT4', '%s/%s.F64' % (SCR,JOB))
+os.putenv('NMRINT5', '%s/%s.F65' % (SCR,JOB))
+os.putenv('NMRINT6', '%s/%s.F66' % (SCR,JOB))
+os.putenv('DCPHFH2', '%s/%s.F67' % (SCR,JOB))
+os.putenv('DCPHF21', '%s/%s.F68' % (SCR,JOB))
+os.putenv('ELNUINT', '%s/%s.F67' % (SCR,JOB))
+os.putenv('NUNUINT', '%s/%s.F68' % (SCR,JOB))
+os.putenv(  'GVVPT', '%s/%s.F69' % (SCR,JOB))
+os.putenv('NUMOIN',  '%s/%s.F69' % (SCR,JOB))
+os.putenv('NUMOCAS', '%s/%s.F70' % (SCR,JOB))
+os.putenv('NUELMO',  '%s/%s.F71' % (SCR,JOB))
+os.putenv('NUELCAS', '%s/%s.F72' % (SCR,JOB))
+## next files are for RI-MP2
+os.putenv( 'RIVMAT', '%s/%s.F51' % (SCR,JOB))
+os.putenv( 'RIT2A',  '%s/%s.F52' % (SCR,JOB))
+os.putenv( 'RIT3A',  '%s/%s.F53' % (SCR,JOB))
+os.putenv( 'RIT2B',  '%s/%s.F54' % (SCR,JOB))
+os.putenv( 'RIT3B',  '%s/%s.F55' % (SCR,JOB))
+#    Next files are for GMCQDPT
+os.putenv('GMCREF', '%s/%s.F70' % (SCR,JOB)) 
+os.putenv('GMCO2R', '%s/%s.F71' % (SCR,JOB))
+os.putenv('GMCROC', '%s/%s.F72' % (SCR,JOB))
+os.putenv('GMCOOC', '%s/%s.F73' % (SCR,JOB))
+os.putenv('GMCCC0', '%s/%s.F74' % (SCR,JOB))
+os.putenv('GMCHMA', '%s/%s.F75' % (SCR,JOB))
+os.putenv('GMCEI1', '%s/%s.F76' % (SCR,JOB))
+os.putenv('GMCEI2', '%s/%s.F77' % (SCR,JOB))
+os.putenv('GMCEOB', '%s/%s.F78' % (SCR,JOB))
+os.putenv('GMCEDT', '%s/%s.F79' % (SCR,JOB))
+os.putenv('GMCERF', '%s/%s.F80' % (SCR,JOB))
+os.putenv('GMCHCR', '%s/%s.F81' % (SCR,JOB))
+os.putenv('GMCGJK', '%s/%s.F82' % (SCR,JOB))
+os.putenv('GMCGAI', '%s/%s.F83' % (SCR,JOB))
+os.putenv('GMCGEO', '%s/%s.F84' % (SCR,JOB))
+os.putenv('GMCTE1', '%s/%s.F85' % (SCR,JOB))
+os.putenv('GMCTE2', '%s/%s.F86' % (SCR,JOB))
+os.putenv('GMCHEF', '%s/%s.F87' % (SCR,JOB))
+os.putenv('GMCMOL', '%s/%s.F88' % (SCR,JOB))
+os.putenv('GMCMOS', '%s/%s.F89' % (SCR,JOB))
+os.putenv('GMCWGT', '%s/%s.F90' % (SCR,JOB))
+os.putenv('GMCRM2', '%s/%s.F91' % (SCR,JOB))
+os.putenv('GMCRM1', '%s/%s.F92' % (SCR,JOB))
+os.putenv('GMCR00', '%s/%s.F93' % (SCR,JOB))
+os.putenv('GMCRP1', '%s/%s.F94' % (SCR,JOB))
+os.putenv('GMCRP2', '%s/%s.F95' % (SCR,JOB))
+os.putenv('GMCVEF', '%s/%s.F96' % (SCR,JOB))
+os.putenv('GMCDIN', '%s/%s.F97' % (SCR,JOB))
+os.putenv('GMC2SZ', '%s/%s.F98' % (SCR,JOB))
+os.putenv('GMCCCS', '%s/%s.F99' % (SCR,JOB))
+
+#    Next files are used only during closed shell coupled cluster runs.
+#    Display the numerous definitions iff they are going to be used.
+#unset echo
+cctyp = IsJobtype(INPNAME,'CCTYP=')
+if (cctyp > 0): #set echo
+    os.putenv( 'CCREST', '%s/%s.F70' % (SCR,JOB)) 
+    os.putenv( 'CCDIIS', '%s/%s.F71' % (SCR,JOB))
+    os.putenv( 'CCINTS', '%s/%s.F72' % (SCR,JOB))
+    os.putenv('CCT1AMP', '%s/%s.F73' % (SCR,JOB))
+    os.putenv('CCT2AMP', '%s/%s.F74' % (SCR,JOB))
+    os.putenv('CCT3AMP', '%s/%s.F75' % (SCR,JOB))
+    os.putenv(   'CCVM', '%s/%s.F76' % (SCR,JOB))
+    os.putenv(   'CCVE', '%s/%s.F77' % (SCR,JOB))
+    os.putenv('CCQUADS', '%s/%s.F78' % (SCR,JOB))
+    os.putenv('QUADSVO', '%s/%s.F79' % (SCR,JOB))
+    os.putenv('EOMSTAR', '%s/%s.F80' % (SCR,JOB))
+    os.putenv('EOMVEC1', '%s/%s.F81' % (SCR,JOB))
+    os.putenv('EOMVEC2', '%s/%s.F82' % (SCR,JOB))
+    os.putenv( 'EOMHC1', '%s/%s.F83' % (SCR,JOB))
+    os.putenv( 'EOMHC2', '%s/%s.F84' % (SCR,JOB))
+    os.putenv('EOMHHHH', '%s/%s.F85' % (SCR,JOB))
+    os.putenv('EOMPPPP', '%s/%s.F86' % (SCR,JOB))
+    os.putenv('EOMRAMP', '%s/%s.F87' % (SCR,JOB))
+    os.putenv('EOMRTMP', '%s/%s.F88' % (SCR,JOB))
+    os.putenv('EOMDG12', '%s/%s.F89' % (SCR,JOB))
+    os.putenv(   'MMPP', '%s/%s.F90' % (SCR,JOB))
+    os.putenv(  'MMHPP', '%s/%s.F91' % (SCR,JOB))
+    os.putenv('MMCIVEC', '%s/%s.F92' % (SCR,JOB))
+    os.putenv('MMCIVC1', '%s/%s.F93' % (SCR,JOB))
+    os.putenv('MMCIITR', '%s/%s.F94' % (SCR,JOB))
+    os.putenv( 'EOMVL1', '%s/%s.F95' % (SCR,JOB))
+    os.putenv( 'EOMVL2', '%s/%s.F96' % (SCR,JOB))
+    os.putenv('EOMLVEC', '%s/%s.F97' % (SCR,JOB))
+    os.putenv( 'EOMHL1', '%s/%s.F98' % (SCR,JOB))
+    os.putenv( 'EOMHL2', '%s/%s.F99' % (SCR,JOB))
+    os.putenv( 'CCVVVV', '%s/%s.F80' % (SCR,JOB))
+    #
+    #    Next files are used only during open shell coupled cluster runs.
+    #
+    os.putenv('AMPROCC', '%s/%s.F70' % (SCR,JOB)) 
+    os.putenv('ITOPNCC', '%s/%s.F71' % (SCR,JOB))
+    os.putenv('FOCKMTX', '%s/%s.F72' % (SCR,JOB))
+    os.putenv( 'LAMB23', '%s/%s.F73' % (SCR,JOB))
+    os.putenv(  'VHHAA', '%s/%s.F74' % (SCR,JOB))
+    os.putenv(  'VHHBB', '%s/%s.F75' % (SCR,JOB))
+    os.putenv(  'VHHAB', '%s/%s.F76' % (SCR,JOB))
+    os.putenv(   'VMAA', '%s/%s.F77' % (SCR,JOB))
+    os.putenv(   'VMBB', '%s/%s.F78' % (SCR,JOB))
+    os.putenv(   'VMAB', '%s/%s.F79' % (SCR,JOB))
+    os.putenv(   'VMBA', '%s/%s.F80' % (SCR,JOB))
+    os.putenv( 'VHPRAA', '%s/%s.F81' % (SCR,JOB))
+    os.putenv( 'VHPRBB', '%s/%s.F82' % (SCR,JOB))
+    os.putenv( 'VHPRAB', '%s/%s.F83' % (SCR,JOB))
+    os.putenv( 'VHPLAA', '%s/%s.F84' % (SCR,JOB))
+    os.putenv( 'VHPLBB', '%s/%s.F85' % (SCR,JOB))
+    os.putenv( 'VHPLAB', '%s/%s.F86' % (SCR,JOB))
+    os.putenv( 'VHPLBA', '%s/%s.F87' % (SCR,JOB))
+    os.putenv(   'VEAA', '%s/%s.F88' % (SCR,JOB))
+    os.putenv(   'VEBB', '%s/%s.F89' % (SCR,JOB))
+    os.putenv(   'VEAB', '%s/%s.F90' % (SCR,JOB))
+    os.putenv(   'VEBA', '%s/%s.F91' % (SCR,JOB))
+    os.putenv(  'VPPPP', '%s/%s.F92' % (SCR,JOB))
+    os.putenv('INTERM1', '%s/%s.F93' % (SCR,JOB))
+    os.putenv('INTERM2', '%s/%s.F94' % (SCR,JOB))
+    os.putenv('INTERM3', '%s/%s.F95' % (SCR,JOB))
+    os.putenv('ITSPACE', '%s/%s.F96' % (SCR,JOB))
+    os.putenv('INSTART', '%s/%s.F97' % (SCR,JOB))
+    os.putenv( 'ITSPC3', '%s/%s.F98' % (SCR,JOB))
+    #unset echo
+#
+#    Next files are used only during elongation method runs.
+#    Display the numerous definitions iff they are going to be used.
+
+#elgtyp = IsJobtype(INPNAME,'NELONG=')
+#if (elgtyp > 0):
+#    ELGNAME=$4
+#    if (null$4 == null) set ELGNAME=ELGFILE
+#    set echo
+#    os.putenv( 'AOINTS',   '%s/$ELGNAME.F08' % (SCR,ELGNAME)) 
+#    os.putenv( 'ELGDOS',   '~%s/scr/%s.ldos' % (USER,JOB))
+#    os.putenv( 'ELGDAT',   '%s/$ELGNAME.F71' % (SCR,ELGNAME))
+#    os.putenv( 'ELGPAR',   '%s/$ELGNAME.F72' % (SCR,ELGNAME))
+#    os.putenv( 'ELGCUT',   '%s/$ELGNAME.F74' % (SCR,ELGNAME))
+#    os.putenv( 'ELGVEC',   '%s/$ELGNAME.F75' % (SCR,ELGNAME))
+#    os.putenv( 'EGINTA',   '%s/$ELGNAME.F77' % (SCR,ELGNAME))
+#    os.putenv( 'EGINTB',   '%s/$ELGNAME.F78' % (SCR,ELGNAME))
+#    os.putenv( 'EGTDHF',   '%s/$ELGNAME.F79' % (SCR,ELGNAME))
+#    os.putenv( 'EGTEST',   '%s/$ELGNAME.F80' % (SCR,ELGNAME))
+#    #unset echo
+#
+#    Next files are used only during extended TDHF package runs.
+#    Display the numerous definitions iff they are going to be used.
+#unset echo
+txtyp = IsJobtype(INPNAME,'RUNTYP=TDHFX')
+if (txtyp > 0): #set echo
+    os.putenv(  'OLI201', '%s/%s.F201' % (SCR,JOB)) 
+    os.putenv(  'OLI202', '%s/%s.F202' % (SCR,JOB))
+    os.putenv(  'OLI203', '%s/%s.F203' % (SCR,JOB))
+    os.putenv(  'OLI204', '%s/%s.F204' % (SCR,JOB))
+    os.putenv(  'OLI205', '%s/%s.F205' % (SCR,JOB))
+    os.putenv(  'OLI206', '%s/%s.F206' % (SCR,JOB))
+    os.putenv(  'OLI207', '%s/%s.F207' % (SCR,JOB))
+    os.putenv(  'OLI208', '%s/%s.F208' % (SCR,JOB))
+    os.putenv(  'OLI209', '%s/%s.F209' % (SCR,JOB))
+    os.putenv(  'OLI210', '%s/%s.F210' % (SCR,JOB))
+    os.putenv(  'OLI211', '%s/%s.F211' % (SCR,JOB))
+    os.putenv(  'OLI212', '%s/%s.F212' % (SCR,JOB))
+    os.putenv(  'OLI213', '%s/%s.F213' % (SCR,JOB))
+    os.putenv(  'OLI214', '%s/%s.F214' % (SCR,JOB))
+    os.putenv(  'OLI215', '%s/%s.F215' % (SCR,JOB))
+    os.putenv(  'OLI216', '%s/%s.F216' % (SCR,JOB))
+    os.putenv(  'OLI217', '%s/%s.F217' % (SCR,JOB))
+    os.putenv(  'OLI218', '%s/%s.F218' % (SCR,JOB))
+    os.putenv(  'OLI219', '%s/%s.F219' % (SCR,JOB))
+    os.putenv(  'OLI220', '%s/%s.F220' % (SCR,JOB))
+    os.putenv(  'OLI221', '%s/%s.F221' % (SCR,JOB))
+    os.putenv(  'OLI222', '%s/%s.F222' % (SCR,JOB))
+    os.putenv(  'OLI223', '%s/%s.F223' % (SCR,JOB))
+    os.putenv(  'OLI224', '%s/%s.F224' % (SCR,JOB))
+    os.putenv(  'OLI225', '%s/%s.F225' % (SCR,JOB))
+    os.putenv(  'OLI226', '%s/%s.F226' % (SCR,JOB))
+    os.putenv(  'OLI227', '%s/%s.F227' % (SCR,JOB))
+    os.putenv(  'OLI228', '%s/%s.F228' % (SCR,JOB))
+    os.putenv(  'OLI229', '%s/%s.F229' % (SCR,JOB))
+    os.putenv(  'OLI230', '%s/%s.F230' % (SCR,JOB))
+    os.putenv(  'OLI231', '%s/%s.F231' % (SCR,JOB))
+    os.putenv(  'OLI232', '%s/%s.F232' % (SCR,JOB))
+    os.putenv(  'OLI233', '%s/%s.F233' % (SCR,JOB))
+    os.putenv(  'OLI234', '%s/%s.F234' % (SCR,JOB))
+    os.putenv(  'OLI235', '%s/%s.F235' % (SCR,JOB))
+    os.putenv(  'OLI236', '%s/%s.F236' % (SCR,JOB))
+    os.putenv(  'OLI237', '%s/%s.F237' % (SCR,JOB))
+    os.putenv(  'OLI238', '%s/%s.F238' % (SCR,JOB))
+    os.putenv(  'OLI239', '%s/%s.F239' % (SCR,JOB))
+    #unset echo
+    
+#    Next files are used only during divide-and-conquer runs
+os.putenv('DCSUB', '%s/%s.F250' % (SCR,JOB)) 
+os.putenv('DCVEC', '%s/%s.F251' % (SCR,JOB))
+os.putenv('DCEIG', '%s/%s.F252' % (SCR,JOB))
+os.putenv('DCDM ', '%s/%s.F253' % (SCR,JOB))
+os.putenv('DCDMO', '%s/%s.F254' % (SCR,JOB))
+os.putenv('DCQ  ', '%s/%s.F255' % (SCR,JOB))
+os.putenv('DCW  ', '%s/%s.F256' % (SCR,JOB))
+os.putenv('DCEDM', '%s/%s.F257' % (SCR,JOB))
+
+#    Next files are used only during LMO hyperpolarizability analysis
+os.putenv( 'LHYPWRK', '%s/%s.F297' % (SCR,JOB)) 
+os.putenv( 'LHYPWK2', '%s/%s.F298' % (SCR,JOB))
+os.putenv( 'BONDDPF', '%s/%s.F299' % (SCR,JOB))
+
+#    Next value is used only within the VB2000 add-on code
+os.putenv('GMSJOBNAME', '%s' % JOB)
+
+#  ---- the middle third of the script is to execute GAMESS ----
+#
+#   Most workstations run DDI over TCP/IP sockets, and therefore execute
+#   according to the following clause.  The installer must
+#      a) Set the path to point to the DDIKICK and GAMESS executables.
+#      b) Build the HOSTLIST variable as a word separated string, i.e. ()'s.
+#         There should be one host name for every compute process that is
+#         to be run.  DDIKICK will automatically generate a set of data
+#         server processes (if required) on the same hosts.
+#   An extended explanation of the arguments to ddikick.x can be found
+#   in the file gamess/ddi/readme.ddi, if you have any trouble executing.
+#
+
+#      ------ Begin MPI run sections -------
+
+if TARGET == 'mpi':
+	PPN=8
+
+	os.putenv('I_MPI_WAIT_MODE', 'enable')
+	os.putenv('I_MPI_PIN', 'disable')
+	os.putenv('I_MPI_DEBUG', '0')
+	os.putenv('I_MPI_STATS', '0')
+	os.putenv('I_MPI_FABRICS', 'dapl')
+	os.putenv('I_MPI_DAT_LIBRARY', 'libdat2.so')
+	os.putenv('GPU_DEVICES', '-1')
+	#
+	#  Now, at last, we can actually kick-off the MPI processes...
+	#
+	OUT.write("MPI kickoff will run GAMESS on %s cores in %s nodes.\n" %(NCPUS,NNODES))
+	OUT.write("The binary to be executed is\n")
+	OUT.write("	%s/gamess.%s.x\n" %(GMSPATH,VERNO))
+	OUT.write("MPI will run %d compute processes and %d data servers,\n" %(NCPUS,NCPUS))
+	OUT.write("	placing %d of each process type onto each node.\n" %PPN)
+	OUT.write("The scratch disk space on each node is %s,"%SCR)
+	OUT.write("	with free space\n")
+	temp = run_bash('df -k %s'%SCR)
+	OUT.write(temp+'\n-------------------------------------------------------\n\n')
+	#
+	os.putenv('setenv I_MPI_HYDRA_ENV', 'all')
+	os.putenv('I_MPI_PERHOST', str(PPN*2))
+
+	if SGEFile == '': tempcmd = '-np %d'%NCPUS
+	else: tempcmd = '-hostfile %s'%SGEFile
+
+	cmd = '/opt/openmpii/bin/mpirun  %s %s/gamess.%s.x < /dev/null'%(tempcmd,GMSPATH,VERNO)
+        print cmd
+	#cmd = 'mpirun %s mytest'%tempcmd
+	print "Gamess run begin ..."
+	tStart = time()
+	run = os.popen(cmd, 'r')
+	while 1:
+		line = run.readline()
+		if line == '': break
+		OUT.write(line)
+		OUT.flush()
+	run.close()
+	tEnd = time()
+
+#      ------ end of the MPI execution section -------
+
+
+#
+#  ---- the bottom third of the script is to clean up all disk files ----
+#
+OUT.write( '\n----- accounting info -----\n')
+OUT.write(run_bash('date')+'\n')
+hour = int((tEnd - tStart)/3600)
+mint = (tEnd - tStart)%3600
+secd = mint%60
+mint = int(mint/60)
+OUT.write('Job finished in %5d hours %3d minites %6.2f seconds.\n'%(hour,mint,secd))
+#
+#   Clean up the master's scratch directory.
+#
+OUT.write('Files used on the master node %s were:\n'%master)
+OUT.write(run_bash('ls -lF %s/%s.*' % (SCR,JOB))+'\n')
+run_bash('rm -f  %s/%s.F*' % (SCR,JOB))
+
+OUT.close()
+print 'Gamess done.'
+sys.exit()

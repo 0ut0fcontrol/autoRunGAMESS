@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 import os,sys
-from eft_calculator842 import EFT_calculator
+from eft_calculator import EFT_calculator
 from mol2mol import * #GAMESS_Settings, WriteINP, WritePDB
 #  The coordinate structure of intermediate data is:
 #      [[elem, x, y, z],
@@ -28,7 +28,7 @@ calculator = EFT_calculator()
 # Please change the following code to whatever needed to generate the input 
 # coordinates files
 # Please make sure to carry the id number along with the results
-root = 'conf842.dat'
+root = 'conf.dat'
 if not os.path.exists(root):os.mkdir(root)
 def mol2mol_init(ele):
     mol = [[i,0.0,0.0,0.0] for i in ele]
